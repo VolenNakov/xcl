@@ -5504,8 +5504,19 @@ unsafe fn warm_once<G>(dev: &ID3D12Device, r: &super::pso_journal::Replay, drive
             if shader_bytes(&d.HS).is_some() || shader_bytes(&d.DS).is_some() || shader_bytes(&d.GS).is_some() {
                 return Err("GS / HS / DS pipeline – left to the title".into());
             }
-            let GraphicsPrep { desc: mut copy, rect_gs, vs_dxil: _vs, ps_dxil: _ps, .. } = prep_graphics(this, d, vs).ok_or("not translated")?;
+            let GraphicsPrep { desc: mut copy, rect_gs, vs_dxil, ps_dxil, samplers, .. } = prep_graphics(this, d, vs).ok_or("not translated")?;
+            // the driver's result goes where `translated_graphics_pso` looks for it (`driver_cache`)
+            let gkey = graphics_blob_key(&copy, &vs_dxil, ps_dxil.as_deref(), rect_gs.as_deref(), &samplers);
+            let disk = driver_cache::graphics_path(gkey.0, gkey.1);
+            if pso_trace() {
+                let ps_hash = shader_bytes(&d.PS).map_or(0, crate::gpu::shader::fnv64);
+                crate::xlog_info!("D3D12.X: replayed graphics PSO, record {ps_hash:016x}, {}", driver_cache::graphics_name(gkey.0, gkey.1));
+            }
+            if disk.as_deref().is_some_and(std::path::Path::is_file) {
+                return Ok(());
+            }
             let _slot = driver();
+            let started = std::time::Instant::now();
             let mut made = None;
             let hr = retry_without_rect_gs(&mut copy, rect_gs.is_some(), |c| match dev.CreateGraphicsPipelineState::<ID3D12PipelineState>(c) {
                 Ok(p) => {
@@ -5517,6 +5528,13 @@ unsafe fn warm_once<G>(dev: &ID3D12Device, r: &super::pso_journal::Replay, drive
                     e.code().0
                 }
             });
+            // one made without its rect list GS is not the pipeline the title asks for
+            let dropped_rect_gs = rect_gs.is_some() && copy.GS.pShaderBytecode.is_null();
+            if let (Some(p), Some(path), false) = (&made, &disk, dropped_rect_gs) {
+                if let Ok(b) = p.GetCachedBlob() {
+                    driver_cache::keep(path, std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize()), started.elapsed());
+                }
+            }
             made.ok_or_else(|| windows::core::Error::from_hresult(windows::core::HRESULT(hr)))
         }
         super::pso_journal::Replay::Compute(d, _) => {
