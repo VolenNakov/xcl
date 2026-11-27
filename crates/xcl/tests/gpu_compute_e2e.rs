@@ -424,9 +424,10 @@ fn named_for_leave_out() -> Vec<u8> {
     blob
 }
 
-/// The CreateComputePipelineState hook with the mirror program's root layout; the pipeline
-/// after a background build.
-fn compute_pso_through_the_hook(dev: &ID3D12Device, blob: &[u8]) -> usize {
+/// The CreateComputePipelineState hook with the mirror program's root layout (or, `with_rs`
+/// false, no root signature in the desc, as a title whose containers carry theirs passes it);
+/// the pipeline after a background build.
+fn compute_pso_through_the_hook(dev: &ID3D12Device, blob: &[u8], with_rs: bool) -> usize {
     let game_rs: ID3D12RootSignature = unsafe {
         let mut ser = None;
         D3D12SerializeRootSignature(&D3D12_ROOT_SIGNATURE_DESC::default(), D3D_ROOT_SIGNATURE_VERSION_1, &mut ser, None).unwrap();
@@ -434,7 +435,7 @@ fn compute_pso_through_the_hook(dev: &ID3D12Device, blob: &[u8]) -> usize {
         dev.CreateRootSignature(0, std::slice::from_raw_parts(ser.GetBufferPointer() as *const u8, ser.GetBufferSize())).unwrap()
     };
     let mut desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-        pRootSignature: std::mem::ManuallyDrop::new(Some(game_rs)),
+        pRootSignature: std::mem::ManuallyDrop::new(with_rs.then_some(game_rs)),
         CS: D3D12_SHADER_BYTECODE { pShaderBytecode: blob.as_ptr() as _, BytecodeLength: blob.len() },
         ..Default::default()
     };
@@ -450,7 +451,7 @@ fn compute_pso_through_the_hook(dev: &ID3D12Device, blob: &[u8]) -> usize {
 /// one whose container holds the fragment is left out:
 /// - in the CreateComputePipelineState hook it gets the dummy program a console shader that
 ///   cannot be translated gets (a console compute pipeline, not a translated one), and is not
-///   translated;
+///   translated, also from a desc without a root signature;
 /// - `xcl shaders --precompile --pipelines` passes it over.
 /// The other program is translated and built as without the switch. The switch is read once
 /// per process, so each path runs in a child process that has it set.
@@ -469,16 +470,20 @@ fn rt_leave_out_skips_the_named_program_and_builds_the_other() {
         assert!(!xcl::gpu::rt_leave_out::holds_any(&plain, &xcl::gpu::rt_leave_out::fragments_of(fragment)));
 
         let before = real::stats();
-        let left = compute_pso_through_the_hook(&dev, &named);
+        let left = compute_pso_through_the_hook(&dev, &named, true);
         let after_named = real::stats();
         assert_eq!(xcl::gpu::rt_leave_out::left_out_count(), 1, "the named program is left out");
         assert_eq!(after_named.translated_pipelines, before.translated_pipelines, "the named program was translated");
         assert!(real::is_console_compute(left), "the named program's pipeline is a console compute pipeline");
         assert!(!real::is_translated_compute(left), "the named program's pipeline is the dummy, not a translated one");
+        // a desc without a root signature: the dummy gets one of XCL's, the driver refuses none
+        let left_bare = compute_pso_through_the_hook(&dev, &named, false);
+        assert_eq!(xcl::gpu::rt_leave_out::left_out_count(), 2, "the named program is left out without a root signature too");
+        assert!(real::is_console_compute(left_bare) && !real::is_translated_compute(left_bare));
 
-        let built = compute_pso_through_the_hook(&dev, &plain);
+        let built = compute_pso_through_the_hook(&dev, &plain, true);
         let after_plain = real::stats();
-        assert_eq!(xcl::gpu::rt_leave_out::left_out_count(), 1, "the other program is not left out");
+        assert_eq!(xcl::gpu::rt_leave_out::left_out_count(), 2, "the other program is not left out");
         assert_eq!(after_plain.translated_pipelines, before.translated_pipelines + 1, "the other program was not translated: {:?}", after_plain.translation_errors);
         assert!(real::is_translated_compute(built), "the other program's pipeline is a translated one");
         return;

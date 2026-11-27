@@ -7706,6 +7706,14 @@ unsafe extern "system" fn dev_create_compute_pso(this: *mut c_void, desc: *const
     let mut copy: D3D12_COMPUTE_PIPELINE_STATE_DESC = std::ptr::read(desc as *const D3D12_COMPUTE_PIPELINE_STATE_DESC);
     copy.CS = bytecode(&dummy().cs);
     copy.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
+    // a program left out of a desc without a root signature (its console container carries its
+    // own): the dummy, which binds nothing, gets XCL's ABI root signature – the driver refuses a
+    // compute pipeline without one
+    if left_out && std::mem::transmute_copy::<_, usize>(&copy.pRootSignature) == 0 {
+        if let Some(rs) = abi_rs_for(this, &[]) {
+            copy.pRootSignature = std::mem::transmute::<*mut c_void, std::mem::ManuallyDrop<Option<ID3D12RootSignature>>>(rs);
+        }
+    }
     let hr2 = finish_pso(this, f, &copy as *const _ as *const c_void, riid, ppv);
     if !left_out || hr2 < 0 {
         note_fallback("compute PSO", hr, hr2 >= 0);
